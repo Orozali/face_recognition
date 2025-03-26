@@ -6,28 +6,25 @@ const FaceRecognition = () => {
   const ws = useRef(null);
   
   const [faces, setFaces] = useState([]);
-  const [isRecognitionActive, setIsRecognitionActive] = useState(false); // Control sending frames!
-
+  
   useEffect(() => {
+    // Access the user's camera
     navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
       }
 
+      // Open WebSocket connection
       ws.current = new WebSocket("ws://localhost:8001/ws");
+
+      ws.current.onopen = () => {
+        console.log("WebSocket Connected!");
+        sendFrame(); // Start sending frames immediately after WebSocket is open
+      };
 
       ws.current.onmessage = (event) => {
         const data = JSON.parse(event.data);
-
-        if (data.command === "start") {
-          console.log("Starting face recognition...");
-          setIsRecognitionActive(true);
-        }
-
-        if (data.command === "stop") {
-          console.log("Stopping face recognition...");
-          setIsRecognitionActive(false);
-        }
+        console.log("Received Data:", data); // Debug WebSocket response
 
         if (data.students) {
           const detectedFaces = data.students.map((student) => {
@@ -47,8 +44,9 @@ const FaceRecognition = () => {
 
       ws.current.onerror = (error) => console.error("WebSocket Error:", error);
 
+      // Function to send frames every 100ms
       const sendFrame = () => {
-        if (isRecognitionActive && ws.current.readyState === WebSocket.OPEN && videoRef.current) {
+        if (ws.current.readyState === WebSocket.OPEN && videoRef.current) {
           const canvas = document.createElement("canvas");
           const ctx = canvas.getContext("2d");
 
@@ -58,23 +56,23 @@ const FaceRecognition = () => {
 
           canvas.toBlob((blob) => {
             if (blob) {
-              ws.current.send(blob);
+              ws.current.send(blob); // Send the frame to WebSocket
+              console.log("Frame sent!"); // Debug if frames are being sent
             }
           }, "image/jpeg");
         }
 
-        setTimeout(sendFrame, 100); // Keep looping, but only sends when active
+        setTimeout(sendFrame, 100); // Continue sending frames every 100ms
       };
 
-      sendFrame();
+      // Clean up WebSocket connection on component unmount
+      return () => {
+        if (ws.current) ws.current.close();
+      };
     });
+  }, []); // Run only once on component mount
 
-    return () => {
-      if (ws.current) ws.current.close();
-    };
-  }, [isRecognitionActive]); // React will update when the flag changes
-
-  // Drawing boxes stays the same...
+  // Drawing boxes on detected faces
   useEffect(() => {
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");

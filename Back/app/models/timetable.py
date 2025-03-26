@@ -26,4 +26,4 @@ class Timetable(Base):
     temporary_attendances = relationship("TemporaryAttendance", back_populates="timetable")
     timetable_times = relationship("Timetable_times", back_populates="timetable", cascade="all, delete")
     def __str__(self):
-            return f"{self.day}"
+            return f"{self.id}"

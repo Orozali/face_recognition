@@ -55,3 +55,58 @@ useEffect(() => {
 
     fetchData();
   }, []);
+
+
+
+
+sync def capture_faces(lesson_time: str):
+    logger.debug(f"connection set with websocket: {websocket}")
+    if latest_frame is None:
+        print("No frame available yet.")
+        return
+    start_time = datetime.strptime(lesson_time, "%H:%M")
+    end_time = start_time + timedelta(minutes=45)
+    today = datetime.now()
+
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(Timetable)
+            .join(Timetable_times, Timetable.id == Timetable_times.timetable_id)
+            .options(
+                selectinload(Timetable.lesson)
+                .selectinload(Lesson.students)
+            )
+            .filter(
+                Timetable.day == DaysEnum[today.strftime('%A').upper()],
+                Timetable_times.start_time == start_time.time(),
+                Timetable_times.end_time == end_time.time()
+            )
+        )
+
+        timetables = result.scalars().all()
+
+        if not timetables:
+            logger.debug(f"No timetables found for the lesson at {lesson_time}.")
+            return
+        logger.debug(f"All timetable got!")
+        frame = latest_frame
+        faces = face_app.get(frame)
+
+        student_info = []
+        stored_embeddings = get_all_embeddings_from_minio()
+
+        for face in faces:
+            embedding = face.embedding
+            bbox = face.bbox.astype(int).tolist()
+            matched_student_id = ml_search_algorithm(stored_embeddings, embedding, thresh=0.5)
+            if matched_student_id != "Unknown":
+                for timetable in timetables:
+                    student = await get_student_details(matched_student_id, session, bbox)
+                    if not student:
+                        return {"error": "Student not found!"}
+                    if is_student_in_timetable(student, timetable):
+                        await save_to_db(student, timetable, session)
+                        student_info.append(student)
+            else:
+                student_info.append({"id": "Unknown", "name": "Unknown", "surname": "Unknown", "student_id": "Unknown", "bbox": bbox})
+    await websocket.send_json(student_info)

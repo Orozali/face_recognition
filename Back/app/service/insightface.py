@@ -30,25 +30,16 @@ face_app = FaceAnalysis(
 face_app.prepare(ctx_id=0, det_size=(640,640), det_thresh=0.5)
 
 
-async def process_frame(image_data: str, db: AsyncSession):
-    nparr = np.frombuffer(image_data, np.uint8)
-    logger.debug(f"Received image data size: {len(nparr)} bytes")
-    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    
-    faces = face_app.get(frame)
-
+async def process_frame(faces: list, all_embddings: list, db: AsyncSession):
     logger.debug(f"Students faces successfully received!: {len(faces)}")
     student_info = []
     
-    stored_embeddings = get_all_embeddings_from_minio()
-    logger.debug(f"Embeddings from minio successfully received: {len(stored_embeddings)}")
-
     for face in faces:
         bbox = face.bbox.astype(int).tolist()
         embedding = face.embedding
         logger.debug("Embedding is received")
         
-        matched_student = ml_search_algorithm(stored_embeddings, embedding, thresh=0.5)
+        matched_student = ml_search_algorithm(all_embddings, embedding, thresh=0.5)
         logger.debug("Ml search algorithm worked")
         if matched_student != "Unknown":
             student = await get_student_details(matched_student, db, bbox)
@@ -95,58 +86,82 @@ async def get_student_details(student_id, db: AsyncSession, bbox) -> Student:
     return None
 
 
-async def save_to_db(student_info: dict, db: AsyncSession):
+async def save_to_db(student_info: dict, timetable_id: int, session: AsyncSession):
     """
-    Save recognized student to the temporary attendance table if they are part of the active lesson.
-    
+    Save recognized student to the temporary attendance table if they are part of the active lesson
+    and have not been recorded already.
+
     :param student_info: Dict containing recognized student's ID and bounding box.
-    :param db: AsyncSession instance.
+    :param timetable_id: The ID of the timetable entry.
+    :param session: AsyncSession instance.
     """
     try:
         current_time = datetime.now().time()
-        current_day = datetime.now().strftime("%A").upper()
-
-        stmt = select(Timetable).where(
-            Timetable.day == current_day,
-            Timetable.start_time <= current_time,
-            Timetable.end_time >= current_time
-        ).options(selectinload(Timetable.lesson).selectinload(Lesson.students))
-        timetable_result = await db.execute(stmt)
-        active_timetable = timetable_result.scalars().first()
-
-
-        if not active_timetable:
-            logger.warning("No active lesson found at this time.")
-            return
-
-        lesson = active_timetable.lesson
-        enrolled_students = {s.id for s in lesson.students}
-
         student_id = student_info.get("id")
-        if student_id not in enrolled_students:
-            return
 
-        stmt = select(TemporaryAttendance).where(
-            TemporaryAttendance.student_id == student_id,
-            TemporaryAttendance.timetable_id == active_timetable.id
+        student = await session.execute(
+            select(Student).filter(Student.id == student_id)
         )
-        existing_entry = (await db.execute(stmt)).scalars().first()
+        student = student.scalars().first()
 
-        if existing_entry:
-            logger.info(f"Student {student_id} is already recorded in temporary attendance. Skipping.")
-            return 
+        if student:
+            # ✅ Check if student is already recorded in temporary attendance
+            existing_record = await session.execute(
+                select(TemporaryAttendance).filter(
+                    TemporaryAttendance.student_id == student_id,
+                    TemporaryAttendance.timetable_id == timetable_id
+                )
+            )
+            existing_record = existing_record.scalars().first()
 
-        temp_attendance = TemporaryAttendance(
-            student_id=student_id,
-            timetable_id=active_timetable.id,
-            entry_time=datetime.now().time()
-        )
-        db.add(temp_attendance)
-        await db.commit()
-        logger.info(f"Student {student_id} successfully added to temporary attendance.")
-
+            if existing_record:
+                logger.debug(f"Student {student.name} {student.surname} is already recorded in temporary attendance.")
+            else:
+                temp_attendance = TemporaryAttendance(
+                    student_id=student.id,
+                    timetable_id=timetable_id,
+                    entry_time=current_time
+                )
+                
+                session.add(temp_attendance)
+                await session.commit()
+                logger.debug(f"Student {student.name} {student.surname} added to temporary attendance.")
+        
+        else:
+            logger.debug(f"Student with ID {student_id} not found.")
+        
     except Exception as e:
         logger.error(f"Error saving to temporary attendance: {e}")
-        await db.rollback()
+        await session.rollback()
 
 
+
+def is_student_in_timetable(matched_student, timetables: list):
+    """
+    Checks if the matched student is in any timetable's lesson students list.
+
+    Args:
+    - matched_student (Student): The student object containing an ID.
+    - timetables (list[Timetable]): List of timetable objects.
+
+    Returns:
+    - tuple: (bool, timetable_id) → True if student exists, along with timetable_id.
+    """
+    for timetable in timetables:
+        if any(student.id == matched_student.id for student in timetable.lesson.students):
+            return True, timetable.id  # Found the student, return immediately
+
+    return False, None
+
+
+async def get_student_details(student_id, db: AsyncSession, bbox) -> Student:
+    result = await db.execute(
+        select(Student.id, Student.name, Student.surname, Student.student_id)
+        .where(Student.student_id == student_id)
+    )
+    student = result.fetchone()
+
+    if student:
+        return {"id": student.id, "name": student.name, "surname": student.surname, "student_id": student.student_id, "bbox": bbox}
+ 
+    return None
